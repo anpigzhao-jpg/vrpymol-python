@@ -63,19 +63,27 @@ def _fraction_non_background(img):
 
 
 @pytest.mark.parametrize(
-    "molecule,reps,min_actors",
+    "molecule,reps,min_points",
     [
-        ("caffeine", ["spheres"], 24),  # one Sphere primitive per atom
-        ("caffeine", ["sticks"], 1),  # Cylinder primitives per bond half
-        ("1crn", ["cartoon"], 1),  # baked IndexedFaceSet ribbon
-        ("1bna", ["cartoon"], 1),  # zero-CONECT DNA stress test, phosphate-backbone cartoon
+        ("caffeine", ["spheres"], 24 * 50),  # real sphere meshes, not 1 degenerate point/atom
+        ("caffeine", ["sticks"], 50),  # real cylinder meshes, not 1 point/bond-half
+        ("1crn", ["cartoon"], 50),  # baked IndexedFaceSet ribbon
+        ("1bna", ["cartoon"], 50),  # zero-CONECT DNA stress test, phosphate-backbone cartoon
     ],
 )
-def test_representation_renders_real_geometry(session, tmp_path, molecule, reps, min_actors):
+def test_representation_renders_real_geometry(session, tmp_path, molecule, reps, min_points):
     actors, img = _render_png_array(session, molecule, reps, tmp_path)
 
-    assert len(actors) >= min_actors, (
-        f"expected at least {min_actors} actors for {molecule} {reps}, got {len(actors)}"
+    # Actor *count* isn't a valid proxy for "real per-atom/per-bond geometry
+    # got created" -- mesh_loader batches many atoms/bonds into few actors
+    # (see wrl_parser.py) precisely to avoid vtkVRMLImporter's one-actor-per-
+    # node overhead. Total point count across actors is what actually rules
+    # out the degenerate-single-point-per-primitive failure mode this test
+    # guards against.
+    total_points = sum(actor.GetMapper().GetInput().GetNumberOfPoints() for actor in actors)
+    assert total_points >= min_points, (
+        f"expected at least {min_points} points across actors for {molecule} {reps}, "
+        f"got {total_points} across {len(actors)} actor(s)"
     )
 
     fraction_lit = _fraction_non_background(img)

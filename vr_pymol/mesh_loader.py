@@ -1,17 +1,166 @@
-"""Load a PyMOL-exported VRML2 (.wrl) scene into VTK actors."""
+"""Load a PyMOL-exported VRML2 (.wrl) scene into VTK actors.
+
+Batches the per-atom Sphere and per-bond Cylinder nodes (see
+`vr_pymol.wrl_parser`) into two actors via `vtkGlyph3D`/manual transforms
+instead of letting `vtkVRMLImporter` create one vtkActor per node -- see
+`wrl_parser` for why (profiled bottleneck: the importer's own `Update()`,
+~70s for 4hhb's 8782 nodes). Everything else (cartoon's baked mesh, lights,
+viewpoint) still goes through `vtkVRMLImporter` on the small leftover file,
+unchanged from before.
+"""
+
+import math
+import tempfile
 
 import vtk
+
+from vr_pymol.wrl_parser import parse_wrl
+
+
+def _color_array(colors_0_1, name="Colors"):
+    arr = vtk.vtkUnsignedCharArray()
+    arr.SetNumberOfComponents(3)
+    arr.SetName(name)
+    for r, g, b in colors_0_1:
+        arr.InsertNextTuple3(
+            round(r * 255), round(g * 255), round(b * 255)
+        )
+    return arr
+
+
+def _direct_color_mapper(polydata):
+    mapper = vtk.vtkPolyDataMapper()
+    mapper.SetInputData(polydata)
+    # UsePointFieldData (not UsePointData) is required for SelectColorArray's
+    # name lookup to actually take effect -- UsePointData instead uses
+    # whatever the *active* scalars happen to be, which for the sphere actor
+    # is vtkGlyph3D's own auto-generated scale-factor array, not "Colors"
+    # (checked directly: using UsePointData rendered every sphere in
+    # grayscale shades tracking radius, not real per-atom color).
+    mapper.SetScalarModeToUsePointFieldData()
+    mapper.SelectColorArray("Colors")
+    mapper.SetColorModeToDirectScalars()
+    return mapper
+
+
+def _sphere_actor(spheres):
+    """One glyphed actor for every atom sphere, batched via `vtkGlyph3D`.
+
+    Spheres are orientation-independent, so uniform per-instance scale
+    (`ScaleModeToScaleByScalar`) is all that's needed on top of the source's
+    unit sphere -- no orientation/anisotropic-scale complications like
+    cylinders have.
+    """
+    points = vtk.vtkPoints()
+    radii = vtk.vtkFloatArray()
+    radii.SetName("radius")
+    for s in spheres:
+        points.InsertNextPoint(*s["center"])
+        radii.InsertNextValue(s["radius"])
+
+    poly = vtk.vtkPolyData()
+    poly.SetPoints(points)
+    poly.GetPointData().SetScalars(radii)
+    poly.GetPointData().AddArray(_color_array(s["color"] for s in spheres))
+
+    source = vtk.vtkSphereSource()
+    source.SetRadius(1.0)
+    source.SetThetaResolution(16)
+    source.SetPhiResolution(16)
+
+    glyph = vtk.vtkGlyph3D()
+    glyph.SetInputData(poly)
+    glyph.SetSourceConnection(source.GetOutputPort())
+    glyph.SetScaleModeToScaleByScalar()
+    glyph.Update()
+
+    actor = vtk.vtkActor()
+    actor.SetMapper(_direct_color_mapper(glyph.GetOutput()))
+    return actor
+
+
+def _cylinder_actor(cylinders):
+    """One actor merging every bond cylinder, transformed individually.
+
+    `vtkGlyph3D`'s vector-orient mode can't cleanly combine "orient by
+    direction" with "anisotropic per-instance scale" here (radius vs. height
+    would need two different arrays sharing the same vector slot -- checked
+    empirically, not just assumed), so each cylinder gets its own exact
+    `vtkTransform` instead: PyMOL's own VRML `rotation`/`translation` fields,
+    replayed verbatim (`vtkTransform` defaults to PreMultiply, so calling
+    `Translate` then `RotateWXYZ` composes as world = T + R*local, matching
+    VRML's Transform semantics -- verified against the expected matrix
+    directly before relying on it). Results are merged with
+    `vtkAppendPolyData` into one real mesh, unlike a glyph mapper's
+    instance-only geometry, so it survives `vtkGLTFExporter` (which was
+    checked to silently emit an empty file for `vtkGlyph3DMapper` actors).
+    """
+    append = vtk.vtkAppendPolyData()
+
+    for cyl in cylinders:
+        source = vtk.vtkCylinderSource()
+        source.SetRadius(cyl["radius"])
+        source.SetHeight(cyl["height"])
+        source.SetResolution(8)
+        source.Update()
+
+        transform = vtk.vtkTransform()
+        transform.Translate(*cyl["center"])
+        transform.RotateWXYZ(cyl["angle_deg"], *cyl["axis"])
+
+        transform_filter = vtk.vtkTransformFilter()
+        transform_filter.SetTransform(transform)
+        transform_filter.SetInputData(source.GetOutput())
+        transform_filter.Update()
+
+        instance = vtk.vtkPolyData()
+        instance.ShallowCopy(transform_filter.GetOutput())
+        n_points = instance.GetNumberOfPoints()
+        colors = vtk.vtkUnsignedCharArray()
+        colors.SetNumberOfComponents(3)
+        colors.SetName("Colors")
+        r, g, b = cyl["color"]
+        rgb = (round(r * 255), round(g * 255), round(b * 255))
+        for _ in range(n_points):
+            colors.InsertNextTuple3(*rgb)
+        instance.GetPointData().SetScalars(colors)
+        instance.GetPointData().SetActiveScalars("Colors")
+
+        append.AddInputData(instance)
+
+    append.Update()
+
+    actor = vtk.vtkActor()
+    actor.SetMapper(_direct_color_mapper(append.GetOutput()))
+    return actor
 
 
 def load_actors(wrl_path):
     """Return the list of vtkActors baked into a PyMOL VRML2 export."""
+    spheres, cylinders, leftover_text = parse_wrl(wrl_path)
+
+    actors = []
+    if spheres:
+        actors.append(_sphere_actor(spheres))
+    if cylinders:
+        actors.append(_cylinder_actor(cylinders))
+
+    fd, leftover_path = tempfile.mkstemp(suffix=".wrl")
+    import os
+
+    with os.fdopen(fd, "w") as f:
+        f.write(leftover_text)
+
     importer = vtk.vtkVRMLImporter()
-    importer.SetFileName(wrl_path)
+    importer.SetFileName(leftover_path)
     importer.Update()
-    actors = list(importer.GetImportedActors())
+    imported = list(importer.GetImportedActors())
     renderer = importer.GetRenderer()
     # Detach actors from the importer's own throwaway renderer so callers can
     # add them to a renderer of their own (VR window, desktop preview, ...).
-    for actor in actors:
+    for actor in imported:
         renderer.RemoveActor(actor)
+    actors.extend(imported)
+
+    os.remove(leftover_path)
     return actors

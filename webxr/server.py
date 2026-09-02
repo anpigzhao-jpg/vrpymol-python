@@ -9,6 +9,7 @@ import os
 import threading
 
 from flask import Flask, Response, jsonify, request, send_from_directory
+from pymol import util
 
 from pymol_bridge.mesh_export import export_wrl
 from pymol_bridge.session import PymolSession
@@ -24,6 +25,22 @@ GLTF_PATH = os.path.join(SCENE_DIR, "scene.gltf")
 
 DEFAULT_MOLECULE = "1crn"
 DEFAULT_REP = "cartoon"
+DEFAULT_COLOR = "default"
+
+# Real PyMOL coloring commands, checked directly against the installed
+# pymol-open-source (`pymol/util.py`) rather than guessed: `util.cbc` (color
+# by chain), `util.cbss` (by secondary structure: red helix/yellow sheet/
+# green loop), `util.chainbow` (real N-to-C rainbow spectrum), and
+# `cmd.spectrum("b", ...)` (by temperature factor) are all real, existing
+# commands -- "default" just skips recoloring, since `session.load` already
+# gives a fresh object in PyMOL's own default (CPK-like) atom colors.
+_COLOR_SCHEMES = {
+    "default": None,
+    "chain": lambda session: util.cbc("all", _self=session.cmd),
+    "rainbow": lambda session: util.chainbow("all", _self=session.cmd),
+    "secondary-structure": lambda session: util.cbss("all", _self=session.cmd),
+    "b-factor": lambda session: session.cmd.spectrum("b", "blue_white_red", "all"),
+}
 
 app = Flask(__name__, static_folder=None)
 _lock = threading.Lock()
@@ -37,24 +54,43 @@ def _get_session():
     return _session
 
 
-def rebuild_scene(molecule, rep, hydrogens=True, waters=True):
+def rebuild_scene(
+    molecule,
+    rep,
+    hydrogens=True,
+    waters=True,
+    color=DEFAULT_COLOR,
+    stick_radius=None,
+    sphere_scale=None,
+):
     """Load `molecule`, show `rep` (one or more reps, "+"-joined), export glTF.
 
     `hydrogens`/`waters` toggle real PyMOL selections (`hydro`, `solvent`)
     off after showing the requested reps, same toggles the Unity project's
-    hotbar exposed.
+    hotbar exposed. `color` picks a real PyMOL coloring scheme (see
+    `_COLOR_SCHEMES`); `stick_radius`/`sphere_scale` are real PyMOL settings
+    (`cmd.set`), left untouched (PyMOL's own current default) when None.
     """
     pdb_path = os.path.join(FIXTURES_DIR, f"{molecule}.pdb")
     if not os.path.isfile(pdb_path):
         raise FileNotFoundError(molecule)
+    if color not in _COLOR_SCHEMES:
+        raise ValueError(f"unknown color scheme {color!r}")
 
     os.makedirs(SCENE_DIR, exist_ok=True)
     with _lock:
         session = _get_session()
         session.load(pdb_path)
+        if stick_radius is not None:
+            session.cmd.set("stick_radius", stick_radius)
+        if sphere_scale is not None:
+            session.cmd.set("sphere_scale", sphere_scale)
         session.cmd.hide("everything")
         for one_rep in rep.split("+"):
             session.cmd.show(one_rep)
+        color_fn = _COLOR_SCHEMES[color]
+        if color_fn is not None:
+            color_fn(session)
         if not hydrogens:
             session.cmd.hide("everything", "hydro")
         if not waters:
@@ -86,10 +122,23 @@ def api_scene():
     rep = request.args.get("rep", DEFAULT_REP)
     hydrogens = request.args.get("hydrogens", "1") != "0"
     waters = request.args.get("waters", "1") != "0"
+    color = request.args.get("color", DEFAULT_COLOR)
+    stick_radius = request.args.get("stick_radius", type=float)
+    sphere_scale = request.args.get("sphere_scale", type=float)
     try:
-        rebuild_scene(molecule, rep, hydrogens=hydrogens, waters=waters)
+        rebuild_scene(
+            molecule,
+            rep,
+            hydrogens=hydrogens,
+            waters=waters,
+            color=color,
+            stick_radius=stick_radius,
+            sphere_scale=sphere_scale,
+        )
     except FileNotFoundError:
         return jsonify({"ok": False, "error": f"unknown molecule {molecule!r}"}), 404
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
     return jsonify(
         {
             "ok": True,
@@ -97,6 +146,9 @@ def api_scene():
             "rep": rep,
             "hydrogens": hydrogens,
             "waters": waters,
+            "color": color,
+            "stick_radius": stick_radius,
+            "sphere_scale": sphere_scale,
         }
     )
 

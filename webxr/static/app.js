@@ -259,7 +259,19 @@ const repCheckboxes = Array.from(
 );
 const showHydrogens = document.getElementById("show-hydrogens");
 const showWaters = document.getElementById("show-waters");
+const colorSelect = document.getElementById("color-select");
+const stickRadius = document.getElementById("stick-radius");
+const stickRadiusValue = document.getElementById("stick-radius-value");
+const sphereScale = document.getElementById("sphere-scale");
+const sphereScaleValue = document.getElementById("sphere-scale-value");
 const resetViewButton = document.getElementById("reset-view");
+
+stickRadius.addEventListener("input", () => {
+  stickRadiusValue.textContent = Number(stickRadius.value).toFixed(2);
+});
+sphereScale.addEventListener("input", () => {
+  sphereScaleValue.textContent = Number(sphereScale.value).toFixed(2);
+});
 
 async function applySelection() {
   const molecule = moleculeSelect.value;
@@ -271,12 +283,15 @@ async function applySelection() {
   const rep = reps.join("+");
   const hydrogens = showHydrogens.checked ? 1 : 0;
   const waters = showWaters.checked ? 1 : 0;
+  const color = colorSelect.value;
 
   hud.textContent = `switching to ${molecule} / ${rep} ...`;
   const response = await fetch(
     `/api/scene?molecule=${encodeURIComponent(molecule)}` +
       `&rep=${encodeURIComponent(rep)}` +
-      `&hydrogens=${hydrogens}&waters=${waters}`,
+      `&hydrogens=${hydrogens}&waters=${waters}` +
+      `&color=${encodeURIComponent(color)}` +
+      `&stick_radius=${stickRadius.value}&sphere_scale=${sphereScale.value}`,
   );
   if (!response.ok) {
     hud.textContent = `failed to switch: ${response.status}`;
@@ -292,6 +307,12 @@ moleculeSelect.addEventListener("change", applySelection);
 repCheckboxes.forEach((cb) => cb.addEventListener("change", applySelection));
 showHydrogens.addEventListener("change", applySelection);
 showWaters.addEventListener("change", applySelection);
+colorSelect.addEventListener("change", applySelection);
+// "change" (commits on release), not "input" (fires every drag pixel) --
+// rebuilding the scene re-exports the whole molecule server-side, too
+// expensive to do on every intermediate slider value.
+stickRadius.addEventListener("change", applySelection);
+sphereScale.addEventListener("change", applySelection);
 resetViewButton.addEventListener("click", resetView);
 window.vrPymolApplySelection = applySelection;
 

@@ -1,0 +1,67 @@
+"""Real PyMOL coloring schemes + size settings, exposed through the server.
+
+Coloring schemes call real pymol-open-source commands checked directly
+against the installed `pymol/util.py` (`cbc`, `cbss`, `chainbow`) plus
+`cmd.spectrum` -- no new rendering machinery, since colors already flow
+through the existing wrl_parser/mesh_loader pipeline unchanged. Same for
+`stick_radius`/`sphere_scale`: real PyMOL settings applied before export, so
+the already-parsed radius fields just come out different.
+"""
+
+import os
+
+import pytest
+
+from vr_pymol.wrl_parser import parse_wrl
+from webxr.server import GLTF_PATH, SCENE_DIR, rebuild_scene
+
+WRL_PATH = os.path.join(SCENE_DIR, "scene.wrl")
+
+
+def _rebuild_and_parse(**kwargs):
+    rebuild_scene(**kwargs)
+    return parse_wrl(WRL_PATH)
+
+
+def test_chain_coloring_gives_distinct_colors_per_chain():
+    # 4hhb is real hemoglobin: 4 chains (2x alpha, 2x beta) -- a real
+    # multi-chain structure, not a contrived fixture.
+    spheres, _, _ = _rebuild_and_parse(molecule="4hhb", rep="spheres", color="chain")
+    distinct_colors = {tuple(round(c, 2) for c in s["color"]) for s in spheres}
+    # >=4 since PyMOL's cbc palette can repeat past a handful of chains, but
+    # 4 real distinct chains should very safely produce well over 1 color
+    # (the single-color failure mode this guards against: color_fn silently
+    # not being called, or `_self` binding to the wrong/global cmd instance).
+    assert len(distinct_colors) >= 3
+
+
+def test_rainbow_and_secondary_structure_and_bfactor_dont_crash_and_vary():
+    for color in ["rainbow", "secondary-structure", "b-factor"]:
+        spheres, cylinders, _ = _rebuild_and_parse(molecule="1crn", rep="cartoon+sticks", color=color)
+        all_colors = {tuple(round(c, 2) for c in s["color"]) for s in spheres}
+        all_colors |= {tuple(round(c, 2) for c in c_["color"]) for c_ in cylinders}
+        assert len(all_colors) >= 2, f"{color}: expected varied colors, got {all_colors}"
+
+
+def test_unknown_color_scheme_rejected():
+    with pytest.raises(ValueError):
+        rebuild_scene(molecule="1crn", rep="cartoon", color="not-a-real-scheme")
+
+
+def test_stick_radius_setting_changes_exported_cylinder_radius():
+    _, cylinders_default, _ = _rebuild_and_parse(molecule="1crn", rep="sticks")
+    _, cylinders_wide, _ = _rebuild_and_parse(molecule="1crn", rep="sticks", stick_radius=0.4)
+
+    default_radius = cylinders_default[0]["radius"]
+    wide_radius = cylinders_wide[0]["radius"]
+    assert wide_radius == pytest.approx(0.4, abs=0.01)
+    assert wide_radius > default_radius
+
+
+def test_sphere_scale_setting_scales_exported_sphere_radius():
+    spheres_default, _, _ = _rebuild_and_parse(molecule="1crn", rep="spheres")
+    spheres_half, _, _ = _rebuild_and_parse(molecule="1crn", rep="spheres", sphere_scale=0.5)
+
+    max_default = max(s["radius"] for s in spheres_default)
+    max_half = max(s["radius"] for s in spheres_half)
+    assert max_half == pytest.approx(max_default * 0.5, rel=0.05)

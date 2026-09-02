@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>VR PyMOL</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #00004d; }
+    canvas { display: block; }
+    #hud {
+      position: fixed; top: 8px; left: 8px; z-index: 1;
+      font-family: monospace; color: #fff; background: rgba(0,0,0,0.4);
+      padding: 6px 10px; border-radius: 4px; font-size: 13px;
+    }
+    #controls {
+      position: fixed; top: 8px; right: 8px; z-index: 1;
+      font-family: monospace; color: #fff; background: rgba(0,0,0,0.55);
+      padding: 8px 10px; border-radius: 4px; font-size: 13px;
+      max-width: 220px;
+    }
+    #controls > section { margin-bottom: 8px; }
+    #controls > section:last-child { margin-bottom: 0; }
+    #controls h4 { margin: 0 0 4px; font-size: 12px; opacity: 0.7; font-weight: normal; }
+    #controls select { margin-left: 4px; }
+    #controls label.rep-option { display: block; }
+    #controls .slow-hint { opacity: 0.6; font-size: 11px; }
+    #reset-view { width: 100%; margin-top: 2px; font-family: monospace; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three.module.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="hud">loading...</div>
+  <div id="controls">
+    <section>
+      <h4>molecule</h4>
+      <select id="molecule-select">
+        <option value="1crn">1crn</option>
+        <option value="caffeine">caffeine</option>
+        <option value="1mbn">1mbn</option>
+        <option value="1bna">1bna</option>
+        <option value="4hhb">4hhb</option>
+        <option value="1lyz">1lyz</option>
+        <option value="1gfl">1gfl</option>
+      </select>
+    </section>
+    <section>
+      <h4>representation (combinable, like real PyMOL) &mdash; big molecules can take a while to switch</h4>
+      <div id="rep-checkboxes">
+        <label class="rep-option"><input type="checkbox" value="cartoon" checked /> cartoon</label>
+        <label class="rep-option"><input type="checkbox" value="sticks" /> sticks</label>
+        <label class="rep-option"><input type="checkbox" value="spheres" /> spheres</label>
+        <label class="rep-option"><input type="checkbox" value="lines" /> lines</label>
+        <label class="rep-option"><input type="checkbox" value="ribbon" /> ribbon</label>
+        <label class="rep-option"><input type="checkbox" value="nonbonded" /> nonbonded</label>
+        <label class="rep-option"><input type="checkbox" value="nb_spheres" /> nb_spheres</label>
+        <label class="rep-option"><input type="checkbox" value="surface" /> surface <span class="slow-hint">(may be slow)</span></label>
+        <label class="rep-option"><input type="checkbox" value="mesh" /> mesh <span class="slow-hint">(may be slow)</span></label>
+        <label class="rep-option"><input type="checkbox" value="dots" /> dots <span class="slow-hint">(may be slow)</span></label>
+      </div>
+    </section>
+    <section>
+      <h4>atoms</h4>
+      <label class="rep-option"><input type="checkbox" id="show-hydrogens" checked /> show hydrogens</label>
+      <label class="rep-option"><input type="checkbox" id="show-waters" checked /> show waters</label>
+    </section>
+    <section>
+      <button id="reset-view" type="button">reset view</button>
+    </section>
+  </div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

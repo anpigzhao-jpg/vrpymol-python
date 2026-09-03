@@ -99,6 +99,47 @@ def test_unchecking_after_rapid_checking_actually_takes_effect(live_server):
         browser.close()
 
 
+def test_controls_disabled_while_a_request_is_in_flight(live_server):
+    """The server can't actually be interrupted mid-render (its single Python
+    thread keeps running to completion regardless of client-side aborts) --
+    confirmed live: a fully-combined representation set left the real server
+    at 100% CPU, unresponsive to anything, for well over a minute. So while
+    a request is genuinely in flight, controls must show as busy/disabled
+    rather than looking interactive but silently doing nothing until a
+    backlog drains -- and must become interactive again once it resolves."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(
+            viewport={"width": 800, "height": 600}, ignore_https_errors=True
+        )
+        page.goto(live_server, wait_until="networkidle")
+        page.wait_for_function(
+            "document.getElementById('hud').textContent.startsWith('loaded')",
+            timeout=10000,
+        )
+
+        assert not page.eval_on_selector("#molecule-select", "el => el.disabled")
+
+        page.check("#rep-checkboxes input[value='surface']")
+        # right after the debounced request actually fires, controls should
+        # be disabled -- give the debounce (300ms) a moment to fire, then
+        # check before the (comparatively slow) surface render can finish.
+        page.wait_for_timeout(400)
+        assert page.eval_on_selector("#molecule-select", "el => el.disabled"), (
+            "expected controls to be disabled while a scene request is in flight"
+        )
+
+        page.wait_for_function(
+            "document.getElementById('hud').textContent.startsWith('loaded')",
+            timeout=30000,
+        )
+        assert not page.eval_on_selector("#molecule-select", "el => el.disabled"), (
+            "expected controls to be re-enabled once the request finished"
+        )
+
+        browser.close()
+
+
 def test_switching_molecule_after_rapid_rep_toggling_still_works(live_server):
     """The second reported symptom: switching molecule (same applySelection
     code path) must not get stuck behind a backlog of earlier rep changes."""

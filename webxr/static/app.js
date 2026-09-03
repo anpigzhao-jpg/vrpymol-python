@@ -473,6 +473,36 @@ let sceneRequestController = null;
 let debounceTimer = null;
 const APPLY_DEBOUNCE_MS = 300;
 
+// The server can't actually be interrupted mid-render by a client-side abort
+// (its single Python thread keeps executing the current /api/scene call to
+// completion regardless of whether anyone's still listening for the
+// response) -- so if several rebuilds are already genuinely queued (e.g. a
+// user deliberately combining every representation, including the
+// explicitly-slow surface/mesh/dots, really can take a long time to render:
+// confirmed live, not assumed -- a fully-combined 1crn request left the
+// server at 100% CPU for well over a minute, unresponsive to *any* other
+// request meanwhile, not just scene ones), the honest thing to do is show
+// that the app is genuinely busy and stop the user piling on more work,
+// rather than pretending the controls are live when clicking them wouldn't
+// visibly do anything until the backlog drains anyway.
+const allControls = [
+  moleculeSelect,
+  ...repCheckboxes,
+  showHydrogens,
+  showWaters,
+  colorSelect,
+  stickRadius,
+  sphereScale,
+  cartoonFlatSheets,
+  cartoonSmoothLoops,
+];
+
+function setControlsBusy(busy) {
+  allControls.forEach((el) => {
+    el.disabled = busy;
+  });
+}
+
 function scheduleApplySelection() {
   hud.textContent = "queued...";
   clearTimeout(debounceTimer);
@@ -498,8 +528,18 @@ async function applySelection() {
     sceneRequestController.abort();
   }
   sceneRequestController = new AbortController();
+  // Stays busy until *this* (the latest) request's real response arrives --
+  // not cleared on an abort, since an abort only means the client gave up
+  // waiting for an older request; the server is still working through its
+  // backlog up to and including whatever request is current now, and only
+  // that request's own response proves the server has actually caught up.
+  setControlsBusy(true);
 
-  hud.textContent = `switching to ${molecule} / ${rep} ...`;
+  const SLOW_REPS = ["surface", "mesh", "dots"];
+  const includesSlowRep = reps.some((r) => SLOW_REPS.includes(r));
+  hud.textContent = includesSlowRep
+    ? `switching to ${molecule} / ${rep} ... (surface/mesh/dots can take a while, controls disabled until it finishes)`
+    : `switching to ${molecule} / ${rep} ...`;
   let response;
   try {
     response = await fetch(
@@ -513,12 +553,14 @@ async function applySelection() {
     );
   } catch (error) {
     if (error.name === "AbortError") return; // superseded by a newer request
+    setControlsBusy(false);
     hud.textContent = `failed to switch: ${error}`;
     return;
   }
   // A newer request has since been issued (and its own response may already
   // have loaded) -- this one is stale, don't let it overwrite newer state.
   if (mySeq !== sceneRequestSeq) return;
+  setControlsBusy(false);
   if (!response.ok) {
     hud.textContent = `failed to switch: ${response.status}`;
     return;

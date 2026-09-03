@@ -26,6 +26,8 @@
     #controls input[type="range"] { width: 60%; vertical-align: middle; }
     #controls .slow-hint { opacity: 0.6; font-size: 11px; }
     #reset-view { width: 100%; margin-top: 2px; font-family: monospace; }
+    #measure-hud { min-height: 2.4em; margin: 4px 0; word-wrap: break-word; }
+    #clear-measurements { width: 100%; font-family: monospace; }
   </style>
   <script type="importmap">
     {
@@ -99,6 +101,12 @@
     <section>
       <h4>background</h4>
       <input type="color" id="bg-color" value="#00004d" />
+    </section>
+    <section>
+      <h4>measure</h4>
+      <label class="rep-option"><input type="checkbox" id="measure-mode" /> click atoms to measure distance</label>
+      <div id="measure-hud" class="slow-hint">&nbsp;</div>
+      <button id="clear-measurements" type="button">clear measurements</button>
     </section>
     <section>
       <button id="reset-view" type="button">reset view</button>

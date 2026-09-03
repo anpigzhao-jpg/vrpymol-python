@@ -170,6 +170,70 @@ def api_scene():
     )
 
 
+@app.route("/api/pick")
+def api_pick():
+    """Nearest real atom to a 3D point, for click-to-select/measure.
+
+    Takes a point in the *molecule's own local coordinate space* (i.e. real
+    PyMOL/PDB Angstrom coordinates, unchanged by whatever fit/scale/rotation
+    the frontend currently has the model under -- the frontend inverts its
+    own display transform via `object3D.worldToLocal()` before calling this,
+    since glTF export bakes real absolute coordinates into vertex positions
+    with no extra node transforms in between).
+
+    Deliberately does NOT thread a custom per-vertex "atom ID" through the
+    batched glyph geometry/glTF export to support picking -- checked earlier
+    that `vtkGLTFExporter` already silently drops things it doesn't
+    understand (see mesh_loader.py's vtkGlyph3DMapper finding), so a custom
+    attribute surviving that export was a real risk not worth taking when
+    "ask PyMOL for the nearest real atom" does the same job with zero
+    changes to the rendering pipeline.
+    """
+    x = request.args.get("x", type=float)
+    y = request.args.get("y", type=float)
+    z = request.args.get("z", type=float)
+    if x is None or y is None or z is None:
+        return jsonify({"ok": False, "error": "x, y, z are required"}), 400
+
+    with _lock:
+        session = _get_session()
+        atoms = session.cmd.get_model("all").atom
+        if not atoms:
+            return jsonify({"ok": False, "error": "no atoms loaded"}), 404
+        best = min(
+            atoms,
+            key=lambda a: (a.coord[0] - x) ** 2 + (a.coord[1] - y) ** 2 + (a.coord[2] - z) ** 2,
+        )
+
+    return jsonify(
+        {
+            "ok": True,
+            "index": best.index,
+            "name": best.name,
+            "resn": best.resn,
+            "resi": best.resi,
+            "chain": best.chain,
+            "element": best.symbol,
+            "coord": list(best.coord),
+        }
+    )
+
+
+@app.route("/api/distance")
+def api_distance():
+    """Real PyMOL distance between two atoms, by their `/api/pick` index."""
+    atom1 = request.args.get("atom1", type=int)
+    atom2 = request.args.get("atom2", type=int)
+    if atom1 is None or atom2 is None:
+        return jsonify({"ok": False, "error": "atom1, atom2 are required"}), 400
+
+    with _lock:
+        session = _get_session()
+        distance = session.cmd.get_distance(f"mol and index {atom1}", f"mol and index {atom2}")
+
+    return jsonify({"ok": True, "distance": distance})
+
+
 @app.route("/<path:path>")
 def static_files(path):
     return send_from_directory(STATIC_DIR, path)

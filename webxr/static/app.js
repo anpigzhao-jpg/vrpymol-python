@@ -79,6 +79,13 @@ function loadScene(url) {
       }
       grabbers.length = 0;
       twoHand = null;
+      // Measurements are children of the old model (see ensureMeasurementGroup)
+      // and get discarded along with it -- rebuilding the scene (molecule/rep/
+      // color/setting change) always clears any in-progress or completed
+      // measurement, same as it already resets grab/fit state above.
+      measurementGroup = null;
+      pendingAtom = null;
+      if (measureHud) measureHud.textContent = " ";
       currentModel = gltf.scene;
       currentFit = computeFit(currentModel);
       applyFit(currentModel, currentFit);
@@ -219,6 +226,152 @@ function updateTwoHandGrab() {
   currentModel.position.addVectors(twoHand.startPosition, midpointDelta);
 }
 
+// --- click-to-measure ---
+//
+// Real per-atom picking without threading a custom atom-ID through the
+// batched glyph geometry/glTF export (a real risk not worth taking: the
+// mesh_loader pipeline already found vtkGLTFExporter silently drops things
+// it doesn't understand, e.g. vtkGlyph3DMapper actors export as empty).
+// Instead a raycast hit's *world* point is inverted back into the model's
+// own local space via `worldToLocal` -- glTF export bakes real absolute
+// PyMOL/PDB Angstrom coordinates straight into vertex positions with no
+// extra node transform in between, so this recovers real molecule-space
+// coordinates regardless of the model's current fit/grab/scale transform --
+// and the server (`/api/pick`) finds the real nearest atom from that point.
+//
+// Exclusive with orbit-drag rather than trying to distinguish a click from
+// a drag-release: toggling measure mode on disables OrbitControls, so every
+// click on the canvas is unambiguously a measurement pick.
+
+const measureToggle = document.getElementById("measure-mode");
+const measureHud = document.getElementById("measure-hud");
+const clearMeasurementsButton = document.getElementById("clear-measurements");
+const MARKER_RADIUS = 0.3; // Angstroms -- small relative to a ~1.5A atom radius
+const PENDING_COLOR = 0xffee00;
+const DONE_COLOR = 0x00e5ff;
+
+let pendingAtom = null; // {index, name, resn, resi, coord, marker}
+let measurementGroup = null; // THREE.Group, child of currentModel
+
+function ensureMeasurementGroup() {
+  if (!currentModel) return null;
+  if (!measurementGroup || measurementGroup.parent !== currentModel) {
+    measurementGroup = new THREE.Group();
+    measurementGroup.name = "measurements";
+    currentModel.add(measurementGroup);
+  }
+  return measurementGroup;
+}
+
+function addMarker(coord, color) {
+  const group = ensureMeasurementGroup();
+  const geometry = new THREE.SphereGeometry(MARKER_RADIUS, 12, 12);
+  // depthTest off + high renderOrder: a marker at an atom's exact center is
+  // otherwise always fully enclosed by (and invisible inside) that atom's
+  // own much larger sphere, regardless of camera angle. Real PyMOL's own
+  // selection indicators are small dots drawn the same way -- ignoring the
+  // depth buffer so they show through solid geometry -- not a workaround
+  // invented for this project.
+  const material = new THREE.MeshBasicMaterial({ color, depthTest: false });
+  const marker = new THREE.Mesh(geometry, material);
+  marker.position.set(coord[0], coord[1], coord[2]);
+  marker.renderOrder = 999;
+  group.add(marker);
+  return marker;
+}
+
+function addLine(coordA, coordB) {
+  const group = ensureMeasurementGroup();
+  const geometry = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(...coordA),
+    new THREE.Vector3(...coordB),
+  ]);
+  // Same depthTest-off reasoning as addMarker -- a line between two atom
+  // centers otherwise runs straight through the molecule's own opaque
+  // geometry and would be mostly hidden.
+  const material = new THREE.LineBasicMaterial({ color: DONE_COLOR, depthTest: false });
+  const line = new THREE.Line(geometry, material);
+  line.renderOrder = 999;
+  group.add(line);
+  return line;
+}
+
+function describeAtom(atom) {
+  return `${atom.name} (${atom.resn}${atom.resi}${atom.chain ? "/" + atom.chain : ""})`;
+}
+
+async function fetchDistance(a, b) {
+  const response = await fetch(`/api/distance?atom1=${a.index}&atom2=${b.index}`);
+  const data = await response.json();
+  if (!data.ok) {
+    measureHud.textContent = `distance lookup failed: ${data.error}`;
+    return;
+  }
+  measureHud.textContent = `${describeAtom(a)} ↔ ${describeAtom(b)}: ${data.distance.toFixed(2)} Å`;
+}
+
+function handlePickedAtom(atom) {
+  if (pendingAtom && pendingAtom.index === atom.index) {
+    measureHud.textContent = `${describeAtom(atom)} selected -- click a different atom to measure`;
+    return;
+  }
+  if (!pendingAtom) {
+    const marker = addMarker(atom.coord, PENDING_COLOR);
+    pendingAtom = { ...atom, marker };
+    measureHud.textContent = `${describeAtom(atom)} selected -- click a second atom`;
+    return;
+  }
+  pendingAtom.marker.material.color.setHex(DONE_COLOR);
+  addMarker(atom.coord, DONE_COLOR);
+  addLine(pendingAtom.coord, atom.coord);
+  fetchDistance(pendingAtom, atom);
+  pendingAtom = null;
+}
+
+async function pickLocalPoint(x, y, z) {
+  const response = await fetch(`/api/pick?x=${x}&y=${y}&z=${z}`);
+  const atom = await response.json();
+  if (!atom.ok) {
+    measureHud.textContent = `pick failed: ${atom.error}`;
+    return null;
+  }
+  handlePickedAtom(atom);
+  return atom;
+}
+
+function onCanvasClick(event) {
+  if (!measureToggle.checked || !currentModel) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1,
+  );
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObject(currentModel, true);
+  if (hits.length === 0) return;
+  const localPoint = currentModel.worldToLocal(hits[0].point.clone());
+  pickLocalPoint(localPoint.x, localPoint.y, localPoint.z);
+}
+
+function clearMeasurements() {
+  if (measurementGroup) {
+    measurementGroup.parent?.remove(measurementGroup);
+    measurementGroup = null;
+  }
+  pendingAtom = null;
+  measureHud.textContent = " ";
+}
+
+renderer.domElement.addEventListener("click", onCanvasClick);
+measureToggle.addEventListener("change", () => {
+  controls.enabled = !measureToggle.checked;
+  if (!measureToggle.checked && pendingAtom) {
+    pendingAtom.marker.material.color.setHex(DONE_COLOR);
+    pendingAtom = null;
+  }
+});
+clearMeasurementsButton.addEventListener("click", clearMeasurements);
+
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
@@ -250,6 +403,20 @@ window.vrPymolDebug = {
   },
   get model() {
     return currentModel;
+  },
+  // deterministic measurement testing, bypassing real mouse-event/raycast
+  // coordinate math (which real clicks still exercise via onCanvasClick):
+  // tests can pass known real PyMOL atom-space coordinates directly.
+  pickLocalPoint,
+  clearMeasurements,
+  get measureHud() {
+    return measureHud.textContent;
+  },
+  get pendingAtom() {
+    return pendingAtom ? { ...pendingAtom, marker: undefined } : null;
+  },
+  get measurementGroup() {
+    return measurementGroup;
   },
 };
 

@@ -264,7 +264,17 @@ const stickRadius = document.getElementById("stick-radius");
 const stickRadiusValue = document.getElementById("stick-radius-value");
 const sphereScale = document.getElementById("sphere-scale");
 const sphereScaleValue = document.getElementById("sphere-scale-value");
+const cartoonFlatSheets = document.getElementById("cartoon-flat-sheets");
+const cartoonSmoothLoops = document.getElementById("cartoon-smooth-loops");
+const bgColor = document.getElementById("bg-color");
 const resetViewButton = document.getElementById("reset-view");
+
+// Background is a pure display setting -- real PyMOL's bg_color never
+// affects exported geometry either, so this is applied client-side only,
+// instantly, with no server round trip.
+bgColor.addEventListener("input", () => {
+  scene.background = new THREE.Color(bgColor.value);
+});
 
 stickRadius.addEventListener("input", () => {
   stickRadiusValue.textContent = Number(stickRadius.value).toFixed(2);
@@ -284,6 +294,8 @@ async function applySelection() {
   const hydrogens = showHydrogens.checked ? 1 : 0;
   const waters = showWaters.checked ? 1 : 0;
   const color = colorSelect.value;
+  const cartoonFlatSheetsVal = cartoonFlatSheets.checked ? 1 : 0;
+  const cartoonSmoothLoopsVal = cartoonSmoothLoops.checked ? 1 : 0;
 
   hud.textContent = `switching to ${molecule} / ${rep} ...`;
   const response = await fetch(
@@ -291,7 +303,8 @@ async function applySelection() {
       `&rep=${encodeURIComponent(rep)}` +
       `&hydrogens=${hydrogens}&waters=${waters}` +
       `&color=${encodeURIComponent(color)}` +
-      `&stick_radius=${stickRadius.value}&sphere_scale=${sphereScale.value}`,
+      `&stick_radius=${stickRadius.value}&sphere_scale=${sphereScale.value}` +
+      `&cartoon_flat_sheets=${cartoonFlatSheetsVal}&cartoon_smooth_loops=${cartoonSmoothLoopsVal}`,
   );
   if (!response.ok) {
     hud.textContent = `failed to switch: ${response.status}`;
@@ -313,6 +326,8 @@ colorSelect.addEventListener("change", applySelection);
 // expensive to do on every intermediate slider value.
 stickRadius.addEventListener("change", applySelection);
 sphereScale.addEventListener("change", applySelection);
+cartoonFlatSheets.addEventListener("change", applySelection);
+cartoonSmoothLoops.addEventListener("change", applySelection);
 resetViewButton.addEventListener("click", resetView);
 window.vrPymolApplySelection = applySelection;
 

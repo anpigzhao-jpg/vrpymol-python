@@ -62,6 +62,8 @@ def rebuild_scene(
     color=DEFAULT_COLOR,
     stick_radius=None,
     sphere_scale=None,
+    cartoon_flat_sheets=True,
+    cartoon_smooth_loops=False,
 ):
     """Load `molecule`, show `rep` (one or more reps, "+"-joined), export glTF.
 
@@ -70,6 +72,13 @@ def rebuild_scene(
     hotbar exposed. `color` picks a real PyMOL coloring scheme (see
     `_COLOR_SCHEMES`); `stick_radius`/`sphere_scale` are real PyMOL settings
     (`cmd.set`), left untouched (PyMOL's own current default) when None.
+    `cartoon_flat_sheets`/`cartoon_smooth_loops` are real PyMOL cartoon
+    settings, checked to actually change the exported cartoon mesh before
+    wiring up (transparency, by contrast, was checked and found to never
+    survive PyMOL's own VRML2 export at all, so it isn't exposed here).
+    Defaults here match PyMOL's own real defaults (checked via `cmd.get`,
+    not assumed): `cartoon_flat_sheets` is on, `cartoon_smooth_loops` is
+    off.
     """
     pdb_path = os.path.join(FIXTURES_DIR, f"{molecule}.pdb")
     if not os.path.isfile(pdb_path):
@@ -85,6 +94,8 @@ def rebuild_scene(
             session.cmd.set("stick_radius", stick_radius)
         if sphere_scale is not None:
             session.cmd.set("sphere_scale", sphere_scale)
+        session.cmd.set("cartoon_flat_sheets", int(cartoon_flat_sheets))
+        session.cmd.set("cartoon_smooth_loops", int(cartoon_smooth_loops))
         session.cmd.hide("everything")
         for one_rep in rep.split("+"):
             session.cmd.show(one_rep)
@@ -125,6 +136,8 @@ def api_scene():
     color = request.args.get("color", DEFAULT_COLOR)
     stick_radius = request.args.get("stick_radius", type=float)
     sphere_scale = request.args.get("sphere_scale", type=float)
+    cartoon_flat_sheets = request.args.get("cartoon_flat_sheets", "1") != "0"
+    cartoon_smooth_loops = request.args.get("cartoon_smooth_loops", "0") != "0"
     try:
         rebuild_scene(
             molecule,
@@ -134,6 +147,8 @@ def api_scene():
             color=color,
             stick_radius=stick_radius,
             sphere_scale=sphere_scale,
+            cartoon_flat_sheets=cartoon_flat_sheets,
+            cartoon_smooth_loops=cartoon_smooth_loops,
         )
     except FileNotFoundError:
         return jsonify({"ok": False, "error": f"unknown molecule {molecule!r}"}), 404
@@ -149,6 +164,8 @@ def api_scene():
             "color": color,
             "stick_radius": stick_radius,
             "sphere_scale": sphere_scale,
+            "cartoon_flat_sheets": cartoon_flat_sheets,
+            "cartoon_smooth_loops": cartoon_smooth_loops,
         }
     )
 

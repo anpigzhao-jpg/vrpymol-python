@@ -53,6 +53,44 @@ def test_color_scheme_change_changes_render(live_server, tmp_path):
     )
 
 
+def test_background_color_picker_changes_render_with_no_server_round_trip(live_server, tmp_path):
+    """Background is display-only (real PyMOL's bg_color never affects
+    exported geometry either), applied client-side -- so this checks the
+    render changes without waiting on any /api/scene round trip."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(
+            viewport={"width": 800, "height": 600}, ignore_https_errors=True
+        )
+        page.goto(live_server, wait_until="networkidle")
+        page.wait_for_function(
+            "document.getElementById('hud').textContent.startsWith('loaded')",
+            timeout=10000,
+        )
+        page.wait_for_timeout(300)
+        before_path = str(tmp_path / "before.png")
+        page.screenshot(path=before_path)
+
+        page.eval_on_selector(
+            "#bg-color",
+            "el => { el.value = '#ff0000'; el.dispatchEvent(new Event('input')); }",
+        )
+        page.wait_for_timeout(100)
+        after_path = str(tmp_path / "after.png")
+        page.screenshot(path=after_path)
+        browser.close()
+
+    with open(before_path, "rb") as f:
+        before_bytes = f.read()
+    with open(after_path, "rb") as f:
+        after_bytes = f.read()
+
+    assert before_bytes != after_bytes, (
+        "page looks identical after changing background color -- "
+        "picker likely isn't wired to scene.background"
+    )
+
+
 def test_stick_radius_slider_changes_render(live_server, tmp_path):
     with sync_playwright() as p:
         browser = p.chromium.launch()

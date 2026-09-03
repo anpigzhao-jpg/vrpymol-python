@@ -13,10 +13,10 @@
       padding: 6px 10px; border-radius: 4px; font-size: 13px;
     }
     #controls {
-      position: fixed; top: 8px; right: 8px; z-index: 1;
+      position: fixed; top: 8px; right: 8px; bottom: 8px; z-index: 1;
       font-family: monospace; color: #fff; background: rgba(0,0,0,0.55);
       padding: 8px 10px; border-radius: 4px; font-size: 13px;
-      max-width: 220px;
+      max-width: 220px; overflow-y: auto;
     }
     #controls > section { margin-bottom: 8px; }
     #controls > section:last-child { margin-bottom: 0; }
@@ -66,6 +66,11 @@
       </div>
     </section>
     <section>
+      <h4>cartoon detail</h4>
+      <label class="rep-option"><input type="checkbox" id="cartoon-flat-sheets" checked /> flat sheets</label>
+      <label class="rep-option"><input type="checkbox" id="cartoon-smooth-loops" /> smooth loops</label>
+    </section>
+    <section>
       <h4>atoms</h4>
       <label class="rep-option"><input type="checkbox" id="show-hydrogens" checked /> show hydrogens</label>
       <label class="rep-option"><input type="checkbox" id="show-waters" checked /> show waters</label>
@@ -90,6 +95,10 @@
         <input type="range" id="sphere-scale" min="0.1" max="1.5" step="0.05" value="1.0" />
         <span id="sphere-scale-value">1.00</span>
       </label>
+    </section>
+    <section>
+      <h4>background</h4>
+      <input type="color" id="bg-color" value="#00004d" />
     </section>
     <section>
       <button id="reset-view" type="button">reset view</button>

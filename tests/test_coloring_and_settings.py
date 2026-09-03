@@ -65,3 +65,29 @@ def test_sphere_scale_setting_scales_exported_sphere_radius():
     max_default = max(s["radius"] for s in spheres_default)
     max_half = max(s["radius"] for s in spheres_half)
     assert max_half == pytest.approx(max_default * 0.5, rel=0.05)
+
+
+def test_rebuild_scene_defaults_match_real_pymol_cartoon_settings():
+    """Guards against silently overriding PyMOL's own real defaults.
+
+    Checked directly via `cmd.get`: real pymol-open-source defaults to
+    cartoon_flat_sheets=on but cartoon_smooth_loops=OFF -- easy to get wrong
+    by assuming symmetry between the two (a real mistake made and caught in
+    this session: passing smooth_loops=True by default silently changed the
+    default cartoon mesh and broke an unrelated raycasting test).
+    """
+    from pymol_bridge.session import PymolSession
+
+    with PymolSession() as s:
+        assert s.cmd.get("cartoon_flat_sheets") == "on"
+        assert s.cmd.get("cartoon_smooth_loops") == "off"
+
+
+def test_cartoon_smooth_loops_setting_changes_exported_cartoon_mesh():
+    _, _, leftover_off = _rebuild_and_parse(
+        molecule="1crn", rep="cartoon", cartoon_smooth_loops=False
+    )
+    _, _, leftover_on = _rebuild_and_parse(
+        molecule="1crn", rep="cartoon", cartoon_smooth_loops=True
+    )
+    assert leftover_off != leftover_on

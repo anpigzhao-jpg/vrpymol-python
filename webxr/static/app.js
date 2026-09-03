@@ -450,6 +450,35 @@ sphereScale.addEventListener("input", () => {
   sphereScaleValue.textContent = Number(sphereScale.value).toFixed(2);
 });
 
+// The server (webxr/server.py) is single-threaded and serializes every
+// /api/scene call behind one global lock -- and some representations
+// (surface/mesh/dots) are genuinely slow to export. Firing a request on
+// every single checkbox's own "change" event, with no cancellation, meant
+// rapidly toggling several boxes (e.g. "select all") queued up a long
+// backlog of expensive rebuilds: every response -- even stale ones from
+// choices already superseded by later clicks -- unconditionally overwrote
+// the view, so unchecking things (or switching molecule, which goes through
+// this same function) just joined the back of the same queue and appeared
+// to do nothing until the whole backlog finally drained. Fixed with three
+// pieces together: (1) debounce coalesces a burst of rapid changes into one
+// request for the *final* state instead of one request per intermediate
+// state; (2) aborting the previous in-flight fetch when a new request
+// starts stops the client waiting on/acting on a request that's already
+// been superseded; (3) the sequence-number guard is the actual correctness
+// backstop -- even if an old request's response arrives after a newer one
+// (e.g. the old fetch was already too far along on the server to actually
+// cancel), it gets discarded instead of clobbering the newer, correct state.
+let sceneRequestSeq = 0;
+let sceneRequestController = null;
+let debounceTimer = null;
+const APPLY_DEBOUNCE_MS = 300;
+
+function scheduleApplySelection() {
+  hud.textContent = "queued...";
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(applySelection, APPLY_DEBOUNCE_MS);
+}
+
 async function applySelection() {
   const molecule = moleculeSelect.value;
   const reps = repCheckboxes.filter((cb) => cb.checked).map((cb) => cb.value);
@@ -464,15 +493,32 @@ async function applySelection() {
   const cartoonFlatSheetsVal = cartoonFlatSheets.checked ? 1 : 0;
   const cartoonSmoothLoopsVal = cartoonSmoothLoops.checked ? 1 : 0;
 
+  const mySeq = ++sceneRequestSeq;
+  if (sceneRequestController) {
+    sceneRequestController.abort();
+  }
+  sceneRequestController = new AbortController();
+
   hud.textContent = `switching to ${molecule} / ${rep} ...`;
-  const response = await fetch(
-    `/api/scene?molecule=${encodeURIComponent(molecule)}` +
-      `&rep=${encodeURIComponent(rep)}` +
-      `&hydrogens=${hydrogens}&waters=${waters}` +
-      `&color=${encodeURIComponent(color)}` +
-      `&stick_radius=${stickRadius.value}&sphere_scale=${sphereScale.value}` +
-      `&cartoon_flat_sheets=${cartoonFlatSheetsVal}&cartoon_smooth_loops=${cartoonSmoothLoopsVal}`,
-  );
+  let response;
+  try {
+    response = await fetch(
+      `/api/scene?molecule=${encodeURIComponent(molecule)}` +
+        `&rep=${encodeURIComponent(rep)}` +
+        `&hydrogens=${hydrogens}&waters=${waters}` +
+        `&color=${encodeURIComponent(color)}` +
+        `&stick_radius=${stickRadius.value}&sphere_scale=${sphereScale.value}` +
+        `&cartoon_flat_sheets=${cartoonFlatSheetsVal}&cartoon_smooth_loops=${cartoonSmoothLoopsVal}`,
+      { signal: sceneRequestController.signal },
+    );
+  } catch (error) {
+    if (error.name === "AbortError") return; // superseded by a newer request
+    hud.textContent = `failed to switch: ${error}`;
+    return;
+  }
+  // A newer request has since been issued (and its own response may already
+  // have loaded) -- this one is stale, don't let it overwrite newer state.
+  if (mySeq !== sceneRequestSeq) return;
   if (!response.ok) {
     hud.textContent = `failed to switch: ${response.status}`;
     return;
@@ -483,18 +529,18 @@ async function applySelection() {
   loadScene(`/scene.gltf?t=${Date.now()}`);
 }
 
-moleculeSelect.addEventListener("change", applySelection);
-repCheckboxes.forEach((cb) => cb.addEventListener("change", applySelection));
-showHydrogens.addEventListener("change", applySelection);
-showWaters.addEventListener("change", applySelection);
-colorSelect.addEventListener("change", applySelection);
+moleculeSelect.addEventListener("change", scheduleApplySelection);
+repCheckboxes.forEach((cb) => cb.addEventListener("change", scheduleApplySelection));
+showHydrogens.addEventListener("change", scheduleApplySelection);
+showWaters.addEventListener("change", scheduleApplySelection);
+colorSelect.addEventListener("change", scheduleApplySelection);
 // "change" (commits on release), not "input" (fires every drag pixel) --
 // rebuilding the scene re-exports the whole molecule server-side, too
 // expensive to do on every intermediate slider value.
-stickRadius.addEventListener("change", applySelection);
-sphereScale.addEventListener("change", applySelection);
-cartoonFlatSheets.addEventListener("change", applySelection);
-cartoonSmoothLoops.addEventListener("change", applySelection);
+stickRadius.addEventListener("change", scheduleApplySelection);
+sphereScale.addEventListener("change", scheduleApplySelection);
+cartoonFlatSheets.addEventListener("change", scheduleApplySelection);
+cartoonSmoothLoops.addEventListener("change", scheduleApplySelection);
 resetViewButton.addEventListener("click", resetView);
 window.vrPymolApplySelection = applySelection;
 

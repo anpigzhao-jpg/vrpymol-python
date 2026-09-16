@@ -29,6 +29,11 @@
     #reset-view { width: 100%; margin-top: 2px; font-family: monospace; }
     #measure-hud { min-height: 2.4em; margin: 4px 0; word-wrap: break-word; }
     #clear-measurements { width: 100%; font-family: monospace; }
+    #object-list { list-style: none; margin: 4px 0; padding: 0; }
+    #object-list li { display: flex; justify-content: space-between; align-items: center; padding: 2px 0; }
+    #object-list button { font-family: monospace; margin-left: 6px; }
+    #add-object-button { margin-left: 4px; font-family: monospace; }
+    #frame-slider { width: 60%; vertical-align: middle; }
   </style>
   <script type="importmap">
     {
@@ -51,7 +56,30 @@
         <option value="4hhb">4hhb</option>
         <option value="1lyz">1lyz</option>
         <option value="1gfl">1gfl</option>
+        <option value="1le0">1le0 (NMR, 20 states)</option>
       </select>
+    </section>
+    <section>
+      <h4>additional objects &mdash; view multiple molecules at once</h4>
+      <select id="add-object-select">
+        <option value="1crn">1crn</option>
+        <option value="caffeine">caffeine</option>
+        <option value="1mbn">1mbn</option>
+        <option value="1bna">1bna</option>
+        <option value="4hhb">4hhb</option>
+        <option value="1lyz">1lyz</option>
+        <option value="1gfl">1gfl</option>
+        <option value="1le0">1le0 (NMR, 20 states)</option>
+      </select>
+      <button id="add-object-button" type="button">add</button>
+      <ul id="object-list"></ul>
+    </section>
+    <section id="frame-section" hidden>
+      <h4>state / frame</h4>
+      <label class="rep-option">frame
+        <input type="range" id="frame-slider" min="1" max="1" step="1" value="1" />
+        <span id="frame-value">1 / 1</span>
+      </label>
     </section>
     <section>
       <h4>representation (combinable, like real PyMOL) &mdash; big molecules can take a while to switch</h4>

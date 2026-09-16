@@ -46,12 +46,71 @@ app = Flask(__name__, static_folder=None)
 _lock = threading.Lock()
 _session = None
 
+# Multi-object registry: object name -> molecule id. "mol" is always the
+# single "primary" object driven by the original `molecule`/`rep`/... params
+# (full-scene-reset semantics, unchanged from before multi-object support);
+# any other keys are "additional" objects added via `/api/objects` that layer
+# alongside the primary one without disturbing it. Display settings (rep,
+# color, hydrogens, ...) are global -- applied uniformly across every loaded
+# object, real PyMOL's own `hide`/`show` default selection ("all") already
+# does this for free, no per-object plumbing needed.
+_objects = {}
+_display_settings = {
+    "rep": DEFAULT_REP,
+    "hydrogens": True,
+    "waters": True,
+    "color": DEFAULT_COLOR,
+    "stick_radius": None,
+    "sphere_scale": None,
+    "cartoon_flat_sheets": True,
+    "cartoon_smooth_loops": False,
+    "frame": 1,
+}
+
 
 def _get_session():
     global _session
     if _session is None:
         _session = PymolSession()
     return _session
+
+
+def _export_current_scene(session, settings):
+    """Apply `settings` (see `_display_settings`) to every currently loaded
+    object and export. Caller must already hold `_lock`.
+
+    `frame` is a real PyMOL movie frame (`cmd.frame`), global across the
+    whole session same as real PyMOL -- not per-object -- verified directly
+    that it changes what a multi-state object (e.g. an NMR ensemble, many
+    states/frames per one object) actually exports via `cmd.save`.
+    """
+    if settings["stick_radius"] is not None:
+        session.cmd.set("stick_radius", settings["stick_radius"])
+    if settings["sphere_scale"] is not None:
+        session.cmd.set("sphere_scale", settings["sphere_scale"])
+    session.cmd.set("cartoon_flat_sheets", int(settings["cartoon_flat_sheets"]))
+    session.cmd.set("cartoon_smooth_loops", int(settings["cartoon_smooth_loops"]))
+    session.cmd.hide("everything")
+    for one_rep in settings["rep"].split("+"):
+        session.cmd.show(one_rep)
+    color_fn = _COLOR_SCHEMES[settings["color"]]
+    if color_fn is not None:
+        color_fn(session)
+    if not settings["hydrogens"]:
+        session.cmd.hide("everything", "hydro")
+    if not settings["waters"]:
+        session.cmd.hide("everything", "solvent")
+
+    max_states = session.cmd.count_states("all") if _objects else 1
+    frame = max(1, min(settings.get("frame", 1), max_states))
+    session.cmd.frame(frame)
+
+    os.makedirs(SCENE_DIR, exist_ok=True)
+    wrl_path = os.path.join(SCENE_DIR, "scene.wrl")
+    export_wrl(session, wrl_path)
+    actors = load_actors(wrl_path)
+    export_gltf(actors, GLTF_PATH)
+    return max_states
 
 
 def rebuild_scene(
@@ -64,8 +123,11 @@ def rebuild_scene(
     sphere_scale=None,
     cartoon_flat_sheets=True,
     cartoon_smooth_loops=False,
+    frame=1,
 ):
-    """Load `molecule`, show `rep` (one or more reps, "+"-joined), export glTF.
+    """Replace the *entire* scene with just `molecule` (single-object mode,
+    the original behavior, object always named "mol") and show `rep` (one or
+    more reps, "+"-joined), export glTF.
 
     `hydrogens`/`waters` toggle real PyMOL selections (`hydro`, `solvent`)
     off after showing the requested reps, same toggles the Unity project's
@@ -78,7 +140,12 @@ def rebuild_scene(
     survive PyMOL's own VRML2 export at all, so it isn't exposed here).
     Defaults here match PyMOL's own real defaults (checked via `cmd.get`,
     not assumed): `cartoon_flat_sheets` is on, `cartoon_smooth_loops` is
-    off.
+    off. `frame` (real PyMOL movie frame) only matters for multi-state
+    molecules (e.g. NMR ensembles); harmless default of 1 for every
+    single-state fixture.
+
+    To add/remove more objects *alongside* this one without resetting the
+    whole scene, use `add_object_to_scene`/`remove_object_from_scene`.
     """
     pdb_path = os.path.join(FIXTURES_DIR, f"{molecule}.pdb")
     if not os.path.isfile(pdb_path):
@@ -86,31 +153,58 @@ def rebuild_scene(
     if color not in _COLOR_SCHEMES:
         raise ValueError(f"unknown color scheme {color!r}")
 
-    os.makedirs(SCENE_DIR, exist_ok=True)
+    settings = dict(
+        rep=rep,
+        hydrogens=hydrogens,
+        waters=waters,
+        color=color,
+        stick_radius=stick_radius,
+        sphere_scale=sphere_scale,
+        cartoon_flat_sheets=cartoon_flat_sheets,
+        cartoon_smooth_loops=cartoon_smooth_loops,
+        frame=frame,
+    )
     with _lock:
         session = _get_session()
         session.load(pdb_path)
-        if stick_radius is not None:
-            session.cmd.set("stick_radius", stick_radius)
-        if sphere_scale is not None:
-            session.cmd.set("sphere_scale", sphere_scale)
-        session.cmd.set("cartoon_flat_sheets", int(cartoon_flat_sheets))
-        session.cmd.set("cartoon_smooth_loops", int(cartoon_smooth_loops))
-        session.cmd.hide("everything")
-        for one_rep in rep.split("+"):
-            session.cmd.show(one_rep)
-        color_fn = _COLOR_SCHEMES[color]
-        if color_fn is not None:
-            color_fn(session)
-        if not hydrogens:
-            session.cmd.hide("everything", "hydro")
-        if not waters:
-            session.cmd.hide("everything", "solvent")
+        _objects.clear()
+        _objects["mol"] = molecule
+        _display_settings.update(settings)
+        _export_current_scene(session, _display_settings)
 
-        wrl_path = os.path.join(SCENE_DIR, "scene.wrl")
-        export_wrl(session, wrl_path)
-        actors = load_actors(wrl_path)
-        export_gltf(actors, GLTF_PATH)
+
+def add_object_to_scene(molecule):
+    """Load `molecule` as an additional object, keeping the primary "mol"
+    object (and any other additional objects) as they are. Returns the
+    (possibly de-duplicated) object name actually used and the new
+    `max_states` across the whole scene."""
+    pdb_path = os.path.join(FIXTURES_DIR, f"{molecule}.pdb")
+    if not os.path.isfile(pdb_path):
+        raise FileNotFoundError(molecule)
+    with _lock:
+        session = _get_session()
+        name = session.add_object(pdb_path, base_name=molecule)
+        _objects[name] = molecule
+        max_states = _export_current_scene(session, _display_settings)
+    return name, max_states
+
+
+def remove_object_from_scene(name):
+    """Remove an additional object (never the primary "mol" one, and never
+    the last remaining object -- the viewer always shows at least one
+    molecule). Returns the new `max_states`."""
+    with _lock:
+        if name not in _objects:
+            raise KeyError(name)
+        if name == "mol":
+            raise ValueError("the primary molecule can't be removed this way -- switch it instead")
+        if len(_objects) <= 1:
+            raise ValueError("at least one object must remain")
+        session = _get_session()
+        session.remove_object(name)
+        del _objects[name]
+        max_states = _export_current_scene(session, _display_settings)
+    return max_states
 
 
 @app.route("/")
@@ -129,45 +223,129 @@ def scene_gltf():
 
 @app.route("/api/scene")
 def api_scene():
-    molecule = request.args.get("molecule", DEFAULT_MOLECULE)
-    rep = request.args.get("rep", DEFAULT_REP)
-    hydrogens = request.args.get("hydrogens", "1") != "0"
-    waters = request.args.get("waters", "1") != "0"
-    color = request.args.get("color", DEFAULT_COLOR)
+    """Update display settings and/or the primary molecule, then export.
+
+    `molecule` is optional and only triggers a full single-object reset (via
+    `rebuild_scene`, wiping any additional objects added through
+    `/api/objects`) when it's actually *changing* the primary "mol" object --
+    the existing frontend's rep/color/etc. controls always resend the
+    currently-selected primary molecule alongside every settings change, and
+    without this check every such change would silently nuke any additional
+    objects even though the user never touched the molecule dropdown.
+    """
+    molecule = request.args.get("molecule")
+    rep = request.args.get("rep", _display_settings["rep"])
+    hydrogens = request.args.get("hydrogens", "1" if _display_settings["hydrogens"] else "0") != "0"
+    waters = request.args.get("waters", "1" if _display_settings["waters"] else "0") != "0"
+    color = request.args.get("color", _display_settings["color"])
     stick_radius = request.args.get("stick_radius", type=float)
+    if stick_radius is None:
+        stick_radius = _display_settings["stick_radius"]
     sphere_scale = request.args.get("sphere_scale", type=float)
-    cartoon_flat_sheets = request.args.get("cartoon_flat_sheets", "1") != "0"
-    cartoon_smooth_loops = request.args.get("cartoon_smooth_loops", "0") != "0"
+    if sphere_scale is None:
+        sphere_scale = _display_settings["sphere_scale"]
+    cartoon_flat_sheets = (
+        request.args.get("cartoon_flat_sheets", "1" if _display_settings["cartoon_flat_sheets"] else "0") != "0"
+    )
+    cartoon_smooth_loops = (
+        request.args.get("cartoon_smooth_loops", "1" if _display_settings["cartoon_smooth_loops"] else "0") != "0"
+    )
+    frame = request.args.get("frame", type=int, default=_display_settings["frame"])
+
     try:
-        rebuild_scene(
-            molecule,
-            rep,
-            hydrogens=hydrogens,
-            waters=waters,
-            color=color,
-            stick_radius=stick_radius,
-            sphere_scale=sphere_scale,
-            cartoon_flat_sheets=cartoon_flat_sheets,
-            cartoon_smooth_loops=cartoon_smooth_loops,
-        )
+        if molecule is not None and _objects.get("mol") != molecule:
+            rebuild_scene(
+                molecule,
+                rep,
+                hydrogens=hydrogens,
+                waters=waters,
+                color=color,
+                stick_radius=stick_radius,
+                sphere_scale=sphere_scale,
+                cartoon_flat_sheets=cartoon_flat_sheets,
+                cartoon_smooth_loops=cartoon_smooth_loops,
+                frame=frame,
+            )
+        else:
+            if color not in _COLOR_SCHEMES:
+                raise ValueError(f"unknown color scheme {color!r}")
+            settings = dict(
+                rep=rep,
+                hydrogens=hydrogens,
+                waters=waters,
+                color=color,
+                stick_radius=stick_radius,
+                sphere_scale=sphere_scale,
+                cartoon_flat_sheets=cartoon_flat_sheets,
+                cartoon_smooth_loops=cartoon_smooth_loops,
+                frame=frame,
+            )
+            with _lock:
+                session = _get_session()
+                _display_settings.update(settings)
+                _export_current_scene(session, _display_settings)
     except FileNotFoundError:
         return jsonify({"ok": False, "error": f"unknown molecule {molecule!r}"}), 404
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
+
+    with _lock:
+        session = _get_session()
+        max_states = session.cmd.count_states("all") if _objects else 1
+        objects = [{"name": n, "molecule": m} for n, m in _objects.items()]
     return jsonify(
         {
             "ok": True,
-            "molecule": molecule,
-            "rep": rep,
-            "hydrogens": hydrogens,
-            "waters": waters,
-            "color": color,
-            "stick_radius": stick_radius,
-            "sphere_scale": sphere_scale,
-            "cartoon_flat_sheets": cartoon_flat_sheets,
-            "cartoon_smooth_loops": cartoon_smooth_loops,
+            "objects": objects,
+            "rep": _display_settings["rep"],
+            "hydrogens": _display_settings["hydrogens"],
+            "waters": _display_settings["waters"],
+            "color": _display_settings["color"],
+            "stick_radius": _display_settings["stick_radius"],
+            "sphere_scale": _display_settings["sphere_scale"],
+            "cartoon_flat_sheets": _display_settings["cartoon_flat_sheets"],
+            "cartoon_smooth_loops": _display_settings["cartoon_smooth_loops"],
+            "frame": _display_settings["frame"],
+            "max_states": max_states,
         }
     )
+
+
+@app.route("/api/objects", methods=["GET"])
+def api_objects_list():
+    with _lock:
+        session = _get_session()
+        max_states = session.cmd.count_states("all") if _objects else 1
+        objects = [{"name": n, "molecule": m} for n, m in _objects.items()]
+    return jsonify({"ok": True, "objects": objects, "max_states": max_states})
+
+
+@app.route("/api/objects", methods=["POST"])
+def api_objects_add():
+    data = request.get_json(silent=True) or {}
+    molecule = data.get("molecule")
+    if not molecule:
+        return jsonify({"ok": False, "error": "molecule is required"}), 400
+    try:
+        name, max_states = add_object_to_scene(molecule)
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": f"unknown molecule {molecule!r}"}), 404
+    with _lock:
+        objects = [{"name": n, "molecule": m} for n, m in _objects.items()]
+    return jsonify({"ok": True, "name": name, "objects": objects, "max_states": max_states})
+
+
+@app.route("/api/objects/<name>", methods=["DELETE"])
+def api_objects_remove(name):
+    try:
+        max_states = remove_object_from_scene(name)
+    except KeyError:
+        return jsonify({"ok": False, "error": f"no such object {name!r}"}), 404
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    with _lock:
+        objects = [{"name": n, "molecule": m} for n, m in _objects.items()]
+    return jsonify({"ok": True, "objects": objects, "max_states": max_states})
 
 
 @app.route("/api/pick")
@@ -197,17 +375,28 @@ def api_pick():
 
     with _lock:
         session = _get_session()
-        atoms = session.cmd.get_model("all").atom
-        if not atoms:
+        # `index` is only unique *within* one object in real PyMOL (two
+        # different objects can both have an atom at index 1) -- with
+        # multiple objects loaded, disambiguate by pairing each atom with
+        # its own object name (`cmd.get_object_list` + one `get_model` call
+        # per object), same as real PyMOL selections do (`object and index N`).
+        best = None
+        best_object = None
+        best_dist = None
+        for object_name in session.cmd.get_object_list():
+            for atom in session.cmd.get_model(object_name).atom:
+                dist = (
+                    (atom.coord[0] - x) ** 2 + (atom.coord[1] - y) ** 2 + (atom.coord[2] - z) ** 2
+                )
+                if best_dist is None or dist < best_dist:
+                    best, best_object, best_dist = atom, object_name, dist
+        if best is None:
             return jsonify({"ok": False, "error": "no atoms loaded"}), 404
-        best = min(
-            atoms,
-            key=lambda a: (a.coord[0] - x) ** 2 + (a.coord[1] - y) ** 2 + (a.coord[2] - z) ** 2,
-        )
 
     return jsonify(
         {
             "ok": True,
+            "object": best_object,
             "index": best.index,
             "name": best.name,
             "resn": best.resn,
@@ -221,15 +410,25 @@ def api_pick():
 
 @app.route("/api/distance")
 def api_distance():
-    """Real PyMOL distance between two atoms, by their `/api/pick` index."""
+    """Real PyMOL distance between two atoms, by their `/api/pick` index.
+
+    `object1`/`object2` (from `/api/pick`'s own `object` field) default to
+    "mol" for backward compatibility with single-object callers, but are
+    required for a correct result once more than one object is loaded --
+    `index` alone is only unique within one object.
+    """
     atom1 = request.args.get("atom1", type=int)
     atom2 = request.args.get("atom2", type=int)
+    object1 = request.args.get("object1", "mol")
+    object2 = request.args.get("object2", "mol")
     if atom1 is None or atom2 is None:
         return jsonify({"ok": False, "error": "atom1, atom2 are required"}), 400
 
     with _lock:
         session = _get_session()
-        distance = session.cmd.get_distance(f"mol and index {atom1}", f"mol and index {atom2}")
+        distance = session.cmd.get_distance(
+            f"{object1} and index {atom1}", f"{object2} and index {atom2}"
+        )
 
     return jsonify({"ok": True, "distance": distance})
 

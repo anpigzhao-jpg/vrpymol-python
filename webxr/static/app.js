@@ -418,6 +418,9 @@ window.vrPymolDebug = {
   get measurementGroup() {
     return measurementGroup;
   },
+  addObject,
+  removeObject,
+  refreshObjects,
 };
 
 const moleculeSelect = document.getElementById("molecule-select");
@@ -435,6 +438,12 @@ const cartoonFlatSheets = document.getElementById("cartoon-flat-sheets");
 const cartoonSmoothLoops = document.getElementById("cartoon-smooth-loops");
 const bgColor = document.getElementById("bg-color");
 const resetViewButton = document.getElementById("reset-view");
+const addObjectSelect = document.getElementById("add-object-select");
+const addObjectButton = document.getElementById("add-object-button");
+const objectList = document.getElementById("object-list");
+const frameSection = document.getElementById("frame-section");
+const frameSlider = document.getElementById("frame-slider");
+const frameValue = document.getElementById("frame-value");
 
 // Background is a pure display setting -- real PyMOL's bg_color never
 // affects exported geometry either, so this is applied client-side only,
@@ -495,6 +504,9 @@ const allControls = [
   sphereScale,
   cartoonFlatSheets,
   cartoonSmoothLoops,
+  addObjectSelect,
+  addObjectButton,
+  frameSlider,
 ];
 
 function setControlsBusy(busy) {
@@ -502,6 +514,96 @@ function setControlsBusy(busy) {
     el.disabled = busy;
   });
 }
+
+// --- multi-object support ---
+//
+// "molecule" (above) stays the single *primary* object ("mol" server-side,
+// full-scene-reset semantics unchanged from before this feature existed --
+// see webxr/server.py's api_scene). This section adds *additional* objects
+// on top of it via `/api/objects`, so more than one molecule can be viewed
+// (and grabbed/rotated together, since they're all children of the same
+// glTF scene root) at once. Real PyMOL has no auto-layout for this; the
+// server auto-arranges new objects along a simple world-space grid so they
+// don't render on top of each other (real PDB coordinate frames are
+// independent per structure and often overlap near the origin by chance).
+
+function renderObjectList(objects) {
+  objectList.innerHTML = "";
+  for (const obj of objects) {
+    if (obj.name === "mol") continue; // the primary object has its own dropdown, not a remove button
+    const li = document.createElement("li");
+    const label = document.createElement("span");
+    label.textContent = `${obj.molecule} (${obj.name})`;
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.textContent = "remove";
+    removeButton.addEventListener("click", () => removeObject(obj.name));
+    li.appendChild(label);
+    li.appendChild(removeButton);
+    objectList.appendChild(li);
+  }
+}
+
+function applyObjectsAndFrame(data) {
+  if (!data.objects) return;
+  renderObjectList(data.objects);
+  const maxStates = data.max_states || 1;
+  frameSection.hidden = maxStates <= 1;
+  frameSlider.max = maxStates;
+  const frame = Math.min(Number(frameSlider.value) || 1, maxStates);
+  frameSlider.value = frame;
+  frameValue.textContent = `${frame} / ${maxStates}`;
+}
+
+async function refreshObjects() {
+  const response = await fetch("/api/objects");
+  const data = await response.json();
+  if (data.ok) applyObjectsAndFrame(data);
+}
+
+async function addObject() {
+  setControlsBusy(true);
+  hud.textContent = `adding ${addObjectSelect.value} ...`;
+  try {
+    const response = await fetch("/api/objects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ molecule: addObjectSelect.value }),
+    });
+    const data = await response.json();
+    if (!data.ok) {
+      hud.textContent = `failed to add object: ${data.error}`;
+      return;
+    }
+    applyObjectsAndFrame(data);
+    loadScene(`/scene.gltf?t=${Date.now()}`);
+  } finally {
+    setControlsBusy(false);
+  }
+}
+
+async function removeObject(name) {
+  setControlsBusy(true);
+  hud.textContent = `removing ${name} ...`;
+  try {
+    const response = await fetch(`/api/objects/${encodeURIComponent(name)}`, { method: "DELETE" });
+    const data = await response.json();
+    if (!data.ok) {
+      hud.textContent = `failed to remove object: ${data.error}`;
+      return;
+    }
+    applyObjectsAndFrame(data);
+    loadScene(`/scene.gltf?t=${Date.now()}`);
+  } finally {
+    setControlsBusy(false);
+  }
+}
+
+addObjectButton.addEventListener("click", addObject);
+frameSlider.addEventListener("input", () => {
+  frameValue.textContent = `${frameSlider.value} / ${frameSlider.max}`;
+});
+frameSlider.addEventListener("change", scheduleApplySelection);
 
 function scheduleApplySelection() {
   hud.textContent = "queued...";
@@ -522,6 +624,7 @@ async function applySelection() {
   const color = colorSelect.value;
   const cartoonFlatSheetsVal = cartoonFlatSheets.checked ? 1 : 0;
   const cartoonSmoothLoopsVal = cartoonSmoothLoops.checked ? 1 : 0;
+  const frame = frameSlider.value;
 
   const mySeq = ++sceneRequestSeq;
   if (sceneRequestController) {
@@ -548,7 +651,8 @@ async function applySelection() {
         `&hydrogens=${hydrogens}&waters=${waters}` +
         `&color=${encodeURIComponent(color)}` +
         `&stick_radius=${stickRadius.value}&sphere_scale=${sphereScale.value}` +
-        `&cartoon_flat_sheets=${cartoonFlatSheetsVal}&cartoon_smooth_loops=${cartoonSmoothLoopsVal}`,
+        `&cartoon_flat_sheets=${cartoonFlatSheetsVal}&cartoon_smooth_loops=${cartoonSmoothLoopsVal}` +
+        `&frame=${frame}`,
       { signal: sceneRequestController.signal },
     );
   } catch (error) {
@@ -565,6 +669,8 @@ async function applySelection() {
     hud.textContent = `failed to switch: ${response.status}`;
     return;
   }
+  const data = await response.json();
+  applyObjectsAndFrame(data);
   // cache-bust: the server overwrites the same path each time, and the
   // no-store header on /scene.gltf covers most browsers, but GLTFLoader's
   // internal fetch caching is bypassed reliably with a query param too.
@@ -587,3 +693,4 @@ resetViewButton.addEventListener("click", resetView);
 window.vrPymolApplySelection = applySelection;
 
 loadScene("/scene.gltf");
+refreshObjects();

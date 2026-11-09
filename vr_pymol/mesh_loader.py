@@ -43,6 +43,19 @@ def _direct_color_mapper(polydata):
     return mapper
 
 
+# A headset GPU (Quest 3 in a browser, drawing every triangle twice for
+# stereo) comfortably handles very roughly 0.5-1M triangles per frame. At
+# 16x16 (~450 triangles per sphere) a few thousand atoms already blow past
+# that -- 4HHB as spheres was ~2.1M triangles -- so large scenes drop to
+# 10x8 (~140 per sphere). Small molecules keep the smoother spheres, since
+# they're cheap and get viewed up close.
+LARGE_SPHERE_COUNT = 2000
+
+
+def _sphere_resolution(count):
+    return (10, 8) if count > LARGE_SPHERE_COUNT else (16, 16)
+
+
 def _sphere_actor(spheres):
     """One glyphed actor for every atom sphere, batched via `vtkGlyph3D`.
 
@@ -65,8 +78,9 @@ def _sphere_actor(spheres):
 
     source = vtk.vtkSphereSource()
     source.SetRadius(1.0)
-    source.SetThetaResolution(16)
-    source.SetPhiResolution(16)
+    theta, phi = _sphere_resolution(len(spheres))
+    source.SetThetaResolution(theta)
+    source.SetPhiResolution(phi)
 
     glyph = vtk.vtkGlyph3D()
     glyph.SetInputData(poly)

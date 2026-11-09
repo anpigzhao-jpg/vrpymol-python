@@ -3,3 +3,4 @@ __pycache__/
 .pytest_cache/
 webxr/certs/
 webxr/_scene/
+_site/

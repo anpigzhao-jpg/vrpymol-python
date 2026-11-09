@@ -52,6 +52,19 @@ python -m webxr.server
 
 It prints an HTTPS URL (WebXR requires a secure context, so the server terminates TLS itself with a self-signed dev cert — see `webxr/dev_cert.py`). Open that URL on the headset's browser (same Wi-Fi network), accept the certificate warning, and click "Enter VR". On a desktop browser it works the same way, minus the VR button.
 
+## Static build (GitHub Pages, no server)
+
+A serverless build is published at **https://anpigzhao-jpg.github.io/vrpymol-python/** — open it in the Meta Quest Browser and tap "Enter VR". Nothing needs to run on your computer.
+
+Since PyMOL can't run inside a browser, the static build is pre-baked: `webxr/bake_static.py` runs the same real-PyMOL export pipeline ahead of time for every molecule × representation × color scheme in a fixed grid, compresses each scene to a quantized `.glb` (`vr_pymol/glb_pack.py`), and writes a per-molecule atom table so click-to-measure still works client-side. The page picks one representation preset at a time; free combination of representations, extra objects, NMR frames and the size/cartoon sliders need the live server above.
+
+Rebuild and publish:
+
+```bash
+python -m webxr.bake_static          # writes _site/ (~15 min)
+./webxr/publish_pages.sh             # pushes _site/ to the gh-pages branch
+```
+
 ## Testing
 
 ```bash
@@ -64,7 +77,7 @@ Tests run against the real pymol-open-source engine (no mocking) and drive the a
 
 - `pymol_bridge/` — thin wrapper around real pymol-open-source (`pymol2.PyMOL()`), object/state management, VRML2 export.
 - `vr_pymol/` — VRML2 parsing, batched VTK mesh loading, glTF export, desktop preview rendering.
-- `webxr/` — the Flask server (`server.py`) and the WebXR frontend (`static/`, plain Three.js + import maps, no build step).
+- `webxr/` — the Flask server (`server.py`), the WebXR frontend (`static/`, plain Three.js + import maps, no build step), and the static GitHub Pages bake (`bake_static.py`, `publish_pages.sh`).
 - `tests/` — real-PyMOL-backed pytest suite, including Playwright-driven frontend tests via a live server subprocess.
 
 ## Platform note

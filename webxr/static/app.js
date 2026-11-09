@@ -8,8 +8,13 @@ const hud = document.getElementById("hud");
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x00004d);
 
-const DEFAULT_CAMERA_POSITION = new THREE.Vector3(0, 1.4, 2);
-const DEFAULT_CONTROLS_TARGET = new THREE.Vector3(0, 1.2, 0);
+// Where the molecule sits in world space. In an immersive session the
+// viewer's own head starts at the origin (x=z=0, local-floor height), so the
+// model has to sit out in front along -Z -- at z=0 it renders inside/under
+// the viewer's head. The desktop camera looks at the same spot.
+const MODEL_ANCHOR = new THREE.Vector3(0, 1.2, -0.5);
+const DEFAULT_CAMERA_POSITION = new THREE.Vector3(0, 1.4, 1.5);
+const DEFAULT_CONTROLS_TARGET = MODEL_ANCHOR.clone();
 
 const camera = new THREE.PerspectiveCamera(
   60,
@@ -57,9 +62,9 @@ function computeFit(object) {
   return {
     scale,
     position: new THREE.Vector3(
-      -center.x * scale,
-      1.2 - center.y * scale,
-      -center.z * scale,
+      MODEL_ANCHOR.x - center.x * scale,
+      MODEL_ANCHOR.y - center.y * scale,
+      MODEL_ANCHOR.z - center.z * scale,
     ),
   };
 }
@@ -69,11 +74,17 @@ function applyFit(object, fit) {
   object.position.copy(fit.position);
 }
 
+let loadSeq = 0;
+
 function loadScene(url) {
+  const mySeq = ++loadSeq;
   hud.textContent = `loading ${url} ...`;
   loader.load(
     url,
     (gltf) => {
+      // A newer load was started while this one downloaded (baked files can
+      // be several MB) -- don't let the stale one replace it.
+      if (mySeq !== loadSeq) return;
       if (currentModel) {
         currentModel.parent?.remove(currentModel);
       }
@@ -301,6 +312,17 @@ function describeAtom(atom) {
 }
 
 async function fetchDistance(a, b) {
+  if (staticManifest) {
+    // Same quantity real PyMOL's cmd.get_distance returns for two atoms:
+    // plain Euclidean distance between their coordinates.
+    const distance = Math.hypot(
+      a.coord[0] - b.coord[0],
+      a.coord[1] - b.coord[1],
+      a.coord[2] - b.coord[2],
+    );
+    measureHud.textContent = `${describeAtom(a)} ↔ ${describeAtom(b)}: ${distance.toFixed(2)} Å`;
+    return;
+  }
   const response = await fetch(`/api/distance?atom1=${a.index}&atom2=${b.index}`);
   const data = await response.json();
   if (!data.ok) {
@@ -328,9 +350,33 @@ function handlePickedAtom(atom) {
   pendingAtom = null;
 }
 
+// Static mode's stand-in for /api/pick: same nearest-atom search, over the
+// real PyMOL atom table baked alongside the molecule (webxr/bake_static.py).
+function pickNearestBakedAtom(x, y, z) {
+  if (!staticAtoms || staticAtoms.length === 0) {
+    return { ok: false, error: "atom table not loaded yet" };
+  }
+  let best = null;
+  let bestDist = Infinity;
+  for (const atom of staticAtoms) {
+    const [ax, ay, az] = atom.coord;
+    const dist = (ax - x) ** 2 + (ay - y) ** 2 + (az - z) ** 2;
+    if (dist < bestDist) {
+      best = atom;
+      bestDist = dist;
+    }
+  }
+  return { ok: true, ...best };
+}
+
 async function pickLocalPoint(x, y, z) {
-  const response = await fetch(`/api/pick?x=${x}&y=${y}&z=${z}`);
-  const atom = await response.json();
+  let atom;
+  if (staticManifest) {
+    atom = pickNearestBakedAtom(x, y, z);
+  } else {
+    const response = await fetch(`/api/pick?x=${x}&y=${y}&z=${z}`);
+    atom = await response.json();
+  }
   if (!atom.ok) {
     measureHud.textContent = `pick failed: ${atom.error}`;
     return null;
@@ -392,6 +438,7 @@ window.vrPymolResetView = resetView;
 // WebXR session (no XR device is available in headless Chromium): tests
 // position controllers manually and call onSelectStart/onSelectEnd directly.
 window.vrPymolDebug = {
+  renderer,
   camera,
   controls,
   scene,
@@ -556,6 +603,7 @@ function applyObjectsAndFrame(data) {
 }
 
 async function refreshObjects() {
+  if (staticManifest) return;
   const response = await fetch("/api/objects");
   const data = await response.json();
   if (data.ok) applyObjectsAndFrame(data);
@@ -611,7 +659,81 @@ function scheduleApplySelection() {
   debounceTimer = setTimeout(applySelection, APPLY_DEBOUNCE_MS);
 }
 
+// --- static (serverless) mode ---
+//
+// When served without webxr/server.py -- e.g. from GitHub Pages -- there is
+// no /api to export scenes on demand. webxr/bake_static.py pre-exports a
+// fixed grid of molecule x representation x color through the same real
+// PyMOL pipeline and writes baked/manifest.json, pointed to by a meta tag
+// in its copy of index.html; that switches the page to loading those files. Only controls with a baked equivalent
+// stay visible: one representation preset at a time (instead of free
+// combination), color scheme, background, measure, reset view.
+let staticManifest = null;
+let staticAtoms = null;
+const staticAtomCache = new Map();
+let staticRepSelect = null;
+
+// bake_static.py marks its copy of index.html with this meta tag, so the
+// live-server page never makes a probing request that would 404.
+async function detectStaticMode() {
+  const meta = document.querySelector('meta[name="vrpymol-static-manifest"]');
+  if (!meta) return null;
+  const response = await fetch(meta.content);
+  return await response.json();
+}
+
+function setUpStaticControls(manifest) {
+  document.querySelectorAll("[data-server-only]").forEach((el) => {
+    el.hidden = true;
+  });
+  for (const option of Array.from(moleculeSelect.options)) {
+    if (!manifest.molecules.includes(option.value)) option.remove();
+  }
+  const repContainer = document.getElementById("rep-checkboxes");
+  repContainer.hidden = true;
+  document.getElementById("rep-heading").textContent = "representation";
+  staticRepSelect = document.createElement("select");
+  staticRepSelect.id = "rep-select";
+  for (const rep of manifest.reps) {
+    const option = document.createElement("option");
+    option.value = rep;
+    option.textContent = rep.replace("+", " + ");
+    staticRepSelect.appendChild(option);
+  }
+  repContainer.after(staticRepSelect);
+  staticRepSelect.addEventListener("change", scheduleApplySelection);
+  allControls.push(staticRepSelect);
+}
+
+async function loadStaticAtoms(molecule) {
+  if (!staticAtomCache.has(molecule)) {
+    const response = await fetch(staticManifest.atoms[molecule]);
+    staticAtomCache.set(molecule, await response.json());
+  }
+  return staticAtomCache.get(molecule);
+}
+
+async function applyStaticSelection() {
+  const molecule = moleculeSelect.value;
+  const rep = staticRepSelect.value;
+  const color = colorSelect.value;
+  const url = staticManifest.files[`${molecule}|${rep}|${color}`];
+  if (!url) {
+    hud.textContent = `${molecule} has nothing to show as ${rep} -- try another representation`;
+    return;
+  }
+  const mySeq = ++sceneRequestSeq;
+  staticAtoms = null; // never pick against the previous molecule's atoms
+  loadScene(url);
+  const atoms = await loadStaticAtoms(molecule);
+  if (mySeq === sceneRequestSeq) staticAtoms = atoms;
+}
+
 async function applySelection() {
+  if (staticManifest) {
+    await applyStaticSelection();
+    return;
+  }
   const molecule = moleculeSelect.value;
   const reps = repCheckboxes.filter((cb) => cb.checked).map((cb) => cb.value);
   if (reps.length === 0) {
@@ -692,5 +814,11 @@ cartoonSmoothLoops.addEventListener("change", scheduleApplySelection);
 resetViewButton.addEventListener("click", resetView);
 window.vrPymolApplySelection = applySelection;
 
-loadScene("/scene.gltf");
-refreshObjects();
+staticManifest = await detectStaticMode();
+if (staticManifest) {
+  setUpStaticControls(staticManifest);
+  await applyStaticSelection();
+} else {
+  loadScene("/scene.gltf");
+  refreshObjects();
+}
